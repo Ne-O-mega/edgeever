@@ -32,9 +32,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ClipboardCopyNotice } from "@/components/ClipboardCopyNotice";
+import { WeChatCopyProgress } from "@/components/WeChatCopyProgress";
 import { MemoEditorHeaderActions } from "@/components/MemoEditorHeaderActions";
 import { MemoEditorMetadataRow } from "@/components/MemoEditorMetadataRow";
-import { MemoEditorFocusModeButton, MemoEditorTopRowLeading, MemoEditorUpdatedLabel } from "@/components/MemoEditorTopRowLeading";
+import { MemoEditorFocusModeButton, MemoEditorTopRowLeading } from "@/components/MemoEditorTopRowLeading";
 import { MemoEditorToolbarDivider } from "@/components/MemoEditorToolbarChrome";
 import {
   MEMO_EDITOR_METADATA_ROW_CLASS_NAME,
@@ -116,8 +117,15 @@ import { AiSidebarErrorBoundary } from "./ai-sidebar/AiSidebarErrorBoundary";
 import { api } from "@/lib/api";
 import { isDesktopResourceRuntime, stageDesktopResource, toDesktopResourceDownloadUrl, toDesktopResourceUrl } from "@/lib/desktop-resources";
 import { contentReferencesStagedResourceUrl, findMatchingMemoResource, repairMemoStagedResourceUrls, repairTiptapStagedResourceUrls } from "@/lib/staged-resource-repair";
-import { cn, formatDateTime, parseTagsText } from "@/lib/utils";
+import { cn, parseTagsText } from "@/lib/utils";
 import { editorContentColumnMaxWidth, type EditorContentWidth } from "@/lib/editor-content-width";
+import {
+  EDITOR_ARTICLE_ROW_GAP_PX,
+  EDITOR_COMPACT_READING_GUTTER,
+  EDITOR_PANE_TIGHT_PX,
+  shouldCompactEditorReadingGutter,
+} from "@/lib/editor-reading-gutter";
+import { EDITOR_OUTLINE_WIDTH } from "@/lib/workspace-ui";
 import {
   countMemoCharacters,
   createEdgeEverDocumentExtensions,
@@ -512,21 +520,18 @@ const RichEditorPane = ({
     readEditorOutlineCollapsedPreference({ defaultCollapsed: !demoMode })
   );
   const editorColumnRef = useRef<HTMLDivElement>(null);
-  // The outline is 300px and the desktop gutter is 6rem per side. Below this
-  // pane width those two leave the article at 0, which happens once the AI
-  // sidebar is docked. Hide the outline until the pane is wide enough again.
-  const [editorPaneTight, setEditorPaneTight] = useState(false);
+  // Projected editor-column width. While the sidebar is opening, its width is
+  // still animating, so reserve it immediately or the outline and the 6rem
+  // gutters keep crushing the article for the whole slide.
+  const [editorColumnWidth, setEditorColumnWidth] = useState(0);
   useLayoutEffect(() => {
     const node = editorColumnRef.current;
     if (!node) return;
     const update = () => {
       const column = node.getBoundingClientRect().width;
       const parent = node.parentElement?.getBoundingClientRect().width ?? column;
-      // While the sidebar is opening, its width is still animating, so the column
-      // has not given up that space yet. Reserve it immediately or the outline
-      // crushes the article for the whole slide.
-      const projected = aiAssistantOpen ? parent - readAiSidebarWidth() : column;
-      setEditorPaneTight(projected < 720);
+      const projected = aiAssistantOpen ? Math.max(0, parent - readAiSidebarWidth()) : column;
+      setEditorColumnWidth((current) => (Math.abs(current - projected) < 0.5 ? current : projected));
     };
     update();
     const observer = new ResizeObserver(update);
@@ -3415,7 +3420,6 @@ const RichEditorPane = ({
         ? "bg-slate-100 text-slate-700"
         : saveStateClassName;
 
-  const updatedLabel = formatDateTime(memo.updatedAt);
   const currentMarkdownForAi = getCurrentMarkdownForAi();
 
   const mobileDoneDisabled =
@@ -3567,6 +3571,23 @@ const RichEditorPane = ({
   const contentColumnMode = desktopFocusMode ? "focus" : editorOutlineCollapsed ? "collapsed" : "reading";
   const contentColumnMaxWidth = editorContentColumnMaxWidth(editorContentWidth, contentColumnMode);
   const focusTitleMaxWidth = editorContentColumnMaxWidth(editorContentWidth, "focus");
+  const editorPaneTight = editorColumnWidth > 0 && editorColumnWidth < EDITOR_PANE_TIGHT_PX;
+  const outlineReservesSpace = !editorPaneTight
+    && !isMobileViewport
+    && !useMobilePlainTextEditor
+    && !useMarkdownSourceEditor
+    && !phonePreviewOpen
+    && !editorOutlineCollapsed;
+  const compactEditorReadingGutter = shouldCompactEditorReadingGutter({
+    aiAssistantOpen,
+    desktopColumn: isDesktopColumn,
+    columnWidth: Math.max(0, editorColumnWidth - editorScrollbarGutter * 2),
+    articleMaxWidth: Number.parseInt(contentColumnMaxWidth, 10),
+    reservedBesideArticle: outlineReservesSpace
+      ? Number.parseInt(EDITOR_OUTLINE_WIDTH, 10) + EDITOR_ARTICLE_ROW_GAP_PX
+      : 0,
+    focusRow: desktopFocusMode,
+  });
   const savedQuietly = saveState !== "saving"
     && saveState !== "error"
     && saveState !== "conflict"
@@ -3724,7 +3745,6 @@ const RichEditorPane = ({
 
           <div ref={setHeaderStatusCluster} className="absolute right-1 top-0 flex h-full shrink-0 items-center gap-1 sm:right-2">
             <div className="flex min-w-0 items-center gap-1.5">
-              <MemoEditorUpdatedLabel updatedLabel={updatedLabel} />
               <span className="hidden shrink-0 whitespace-nowrap text-xs tabular-nums text-slate-400 sm:inline">
                 {t("editor.characterCount", { count: characterCount })}
               </span>
@@ -4092,8 +4112,8 @@ const RichEditorPane = ({
                 ? "w-full justify-center"
                 : "w-full"
           )}
-          style={editorPaneTight && !useMarkdownSourceEditor
-            ? { "--editor-reading-gutter": "1.75rem" } as CSSProperties
+          style={(editorPaneTight || compactEditorReadingGutter) && !useMarkdownSourceEditor
+            ? { "--editor-reading-gutter": EDITOR_COMPACT_READING_GUTTER } as CSSProperties
             : undefined}
         >
           <div
@@ -4292,6 +4312,8 @@ const RichEditorPane = ({
           {t(memoIdCopyNotice.status === "copied" ? "editor.noteIdCopied" : "editor.noteIdCopyFailed", { id: memoIdCopyNotice.id })}
         </ClipboardCopyNotice>
       )}
+
+      {wechatCopyState === "copying" && <WeChatCopyProgress />}
 
       {(wechatCopyState === "copied" || wechatCopyState === "error") && (
         <ClipboardCopyNotice status={wechatCopyState === "copied" ? "copied" : "error"}>
